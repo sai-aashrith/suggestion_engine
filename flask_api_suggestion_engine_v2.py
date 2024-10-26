@@ -6,6 +6,7 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
+os.environ["OPENAI_API_KEY"] = ""
 # Initialize the OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -36,11 +37,15 @@ def suggest_fields(existing_fields: List[Dict[str, str]]) -> Dict[str, Dict[str,
     prompt = f"""Given the following existing form fields:
     {fields_str}
     Suggest 5 relevant additional fields that would complement these existing fields.
-    Return the suggestions as a JSON object where each key is the field name and the value is an object with 'label' and 'type' properties.
+    Generate the regex expressions for the suggestions wherever its is relevant
+    Return the suggestions as a JSON object  which has key called suggestions and the value is an array of objects with 'suggested_name', 'regex_validator' ,'label' and 'type'  properties.
     Ensure the output is valid JSON format."""
 
     llm_response = openai_api_call(prompt)
+
+    return json.loads(llm_response)
     
+    '''
     try:
         suggested_fields = json.loads(llm_response)
         if len(suggested_fields) > 5:
@@ -51,11 +56,12 @@ def suggest_fields(existing_fields: List[Dict[str, str]]) -> Dict[str, Dict[str,
                     "label": f"Additional Field {i+1}",
                     "type": "text"
                 }
-        return suggested_fields
+        return suggested_field
+
     except json.JSONDecodeError:
         print("Error: Invalid JSON response from OpenAI API")
         return {}
-
+    '''
 @app.route('/', methods=['GET'])
 def home():
     print("Root route accessed")
