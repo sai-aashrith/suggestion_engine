@@ -24,7 +24,7 @@ field_collection = chroma_client.get_or_create_collection(
     embedding_function=openai_ef
 )
 
-# Global variable to store fields
+# Global variable to store fields in memory
 fields_data = []
 
 def openai_api_call(prompt: str) -> str:
@@ -46,8 +46,29 @@ def openai_api_call(prompt: str) -> str:
         print(f"Error calling OpenAI API: {e}")
         return "{}"
 
+def get_all_fields_from_chromadb():
+    """Retrieve all fields stored in ChromaDB."""
+    try:
+        results = field_collection.get()
+        
+        if results and results['metadatas']:
+            fields = []
+            for metadata in results['metadatas']:
+                fields.append({
+                    "label": metadata["field_name"],
+                    "type": metadata["field_type"],
+                    "metadata": metadata["metadata"],
+                    "storage": ["chromadb"]
+                })
+            return fields
+        return []
+    except Exception as e:
+        print(f"Error retrieving fields from ChromaDB: {e}")
+        return []
+
 def add_field_to_chromadb(field_name: str, field_type: str, metadata: str) -> None:
-    """Add a single field to ChromaDB."""
+    """Add a single field to ChromaDB and update fields_data."""
+    global fields_data
     try:
         # Create a unique ID for the field
         field_id = f"{field_name}_{field_type}".lower().replace(" ", "_")
@@ -65,6 +86,16 @@ def add_field_to_chromadb(field_name: str, field_type: str, metadata: str) -> No
                 "metadata": metadata
             }]
         )
+        
+        # Update fields_data with the new field
+        fields_data.append({
+            "label": field_name,
+            "type": field_type,
+            "metadata": metadata,
+            "storage": ["chromadb", "memory"]
+        })
+        
+        print(f"Added field {field_name} to both ChromaDB and memory")
     except Exception as e:
         print(f"Error adding field to ChromaDB: {e}")
         raise
@@ -122,7 +153,7 @@ def suggest_fields(existing_fields: List[Dict[str, str]]) -> Dict[str, Dict[str,
         print(f"Error in suggest_fields: {e}")
         return {}
 
-# Root route and basic error handlers
+# Routes
 @app.route('/')
 def home():
     return jsonify({
@@ -136,17 +167,58 @@ def home():
             "POST /query_similar": "Query similar fields",
             "POST /interactive_suggest": "Get interactive suggestions",
             "POST /interactive_add": "Add fields interactively",
-            "GET /view_fields": "View all current fields"
+            "GET /view_fields": "View all current fields",
+            "GET /storage_stats": "Get storage statistics"
         }
     })
 
-@app.route('/favicon.ico')
-def favicon():
-    return '', 204
+@app.route('/view_fields', methods=['GET'])
+def view_fields():
+    """View all fields from both ChromaDB and memory with storage information."""
+    global fields_data
+    
+    # Get fields from ChromaDB
+    db_fields = get_all_fields_from_chromadb()
+    
+    # Create a dictionary to track unique fields and their storage locations
+    all_fields = {}
+    
+    # Add fields from memory
+    for field in fields_data:
+        key = f"{field['label']}_{field['type']}"
+        if key not in all_fields:
+            field['storage'] = ['memory']
+            all_fields[key] = field
+        else:
+            if 'memory' not in all_fields[key]['storage']:
+                all_fields[key]['storage'].append('memory')
+    
+    # Add fields from ChromaDB
+    for field in db_fields:
+        key = f"{field['label']}_{field['type']}"
+        if key not in all_fields:
+            all_fields[key] = field
+        else:
+            if 'chromadb' not in all_fields[key]['storage']:
+                all_fields[key]['storage'].append('chromadb')
+    
+    # Statistics about storage
+    storage_stats = {
+        'total_fields': len(all_fields),
+        'in_memory_only': len([f for f in all_fields.values() if f['storage'] == ['memory']]),
+        'in_chromadb_only': len([f for f in all_fields.values() if f['storage'] == ['chromadb']]),
+        'in_both': len([f for f in all_fields.values() if set(f['storage']) == {'memory', 'chromadb'}])
+    }
+    
+    return jsonify({
+        'message': 'Current fields',
+        'fields': list(all_fields.values()),
+        'storage_stats': storage_stats
+    })
 
 @app.route('/add_to_db', methods=['POST'])
 def add_to_db():
-    """Add a new field to the ChromaDB database."""
+    """Add a new field to both ChromaDB and fields_data."""
     try:
         data = request.json
         if not data:
@@ -162,12 +234,14 @@ def add_to_db():
             }), 400
         
         add_field_to_chromadb(field_name, field_type, metadata)
+        
         return jsonify({
             'message': 'Field added to database successfully',
             'field': {
                 'name': field_name,
                 'type': field_type,
-                'metadata': metadata
+                'metadata': metadata,
+                'storage': ['chromadb', 'memory']
             }
         })
     except Exception as e:
@@ -202,6 +276,7 @@ def query_similar():
 
 @app.route('/suggest', methods=['POST'])
 def suggest():
+    """Get field suggestions based on existing fields."""
     try:
         data = request.json
         if not data:
@@ -217,6 +292,7 @@ def suggest():
 
 @app.route('/interactive_suggest', methods=['POST'])
 def interactive_suggest():
+    """Get interactive field suggestions."""
     try:
         data = request.json
         if not data:
@@ -236,6 +312,7 @@ def interactive_suggest():
 
 @app.route('/interactive_add', methods=['POST'])
 def interactive_add():
+    """Add fields interactively."""
     global fields_data
     try:
         data = request.json
@@ -263,14 +340,42 @@ def interactive_add():
             'error': f'Failed to add fields: {str(e)}'
         }), 500
 
-@app.route('/view_fields', methods=['GET'])
-def view_fields():
+@app.route('/storage_stats', methods=['GET'])
+def storage_stats():
+    """Get detailed statistics about field storage."""
     global fields_data
+    
+    # Get fields from ChromaDB
+    db_fields = get_all_fields_from_chromadb()
+    
+    # Create sets of field identifiers for each storage
+    memory_fields = {f"{f['label']}_{f['type']}" for f in fields_data}
+    chromadb_fields = {f"{f['label']}_{f['type']}" for f in db_fields}
+    
+    # Calculate intersections and differences
+    in_both = memory_fields.intersection(chromadb_fields)
+    memory_only = memory_fields - chromadb_fields
+    chromadb_only = chromadb_fields - memory_fields
+    
     return jsonify({
-        'message': 'Current fields',
-        'fields': fields_data
+        'total_unique_fields': len(memory_fields.union(chromadb_fields)),
+        'storage_distribution': {
+            'memory_only': {
+                'count': len(memory_only),
+                'fields': list(memory_only)
+            },
+            'chromadb_only': {
+                'count': len(chromadb_only),
+                'fields': list(chromadb_only)
+            },
+            'in_both_storages': {
+                'count': len(in_both),
+                'fields': list(in_both)
+            }
+        }
     })
 
+# Error handlers
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({
@@ -313,17 +418,22 @@ def seed_initial_data():
     ]
     
     for field in initial_fields:
-        add_field_to_chromadb(
-            field["field_name"],
-            field["field_type"],
-            field["metadata"]
-        )
+        try:
+            add_field_to_chromadb(
+                field["field_name"],
+                field["field_type"],
+                field["metadata"]
+            )
+            print(f"Added field: {field['field_name']} to both ChromaDB and memory")
+        except Exception as e:
+            print(f"Error adding field {field['field_name']}: {e}")
+
 
 if __name__ == "__main__":
     if not os.getenv("OPENAI_API_KEY"):
         print("Error: OpenAI API key not found. Please set the OPENAI_API_KEY environment variable.")
     else:
         print("Starting Flask server...")
-        # Uncomment to seed initial data
+        # Uncomment the following line to seed initial data
         seed_initial_data()
         app.run(debug=True, host='0.0.0.0', port=5000)
